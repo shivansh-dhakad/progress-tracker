@@ -1,77 +1,67 @@
 # Streakbook
 
-Streakbook is a personal goal and study tracker. It helps you plan goals, record daily progress, keep a streak, and understand how you spend study time.
+Streakbook is a personal study and goal tracker. Plan study shifts, tick them off, run a timer, keep a streak, and see where your time goes.
 
 ## Features
 
 ### Dashboard
+- Today's list: timed study-plan shifts first, then daily habits. Weekly and monthly goals sit in a fold below.
+- Streak, today's progress ring and the week at a glance.
+- **Study-time target:** set hours per day and per week in Settings; the dashboard shows a progress ring and weekly bar.
+- **Study timer:** start, pause, resume, or stop and save. Stopping during a planned shift asks "Mark this shift as done?" and counts the time against that shift ("1h 20m of 2h studied"). The timer is saved on the device it runs on.
 
-- See today's progress, current streak, and the week's activity at a glance.
-- Create and manage goals from the **Manage goals** section.
-- Enter and save a note about today's progress.
-- Start a standalone study timer. The timer is separate from goals, remains available while moving between pages, and continues running in the background. Pause, resume, or stop and save a session at any time.
-- Review project goals separately from recurring goals.
+### Study plans
+- Create a plan with a start date, length and weekly shifts (for example 2 shifts a day, Sunday free).
+- **Skip on purpose** or **move to another day** from the ⋯ menu on any unfinished shift. Neither counts as missed. A moved shift counts on the day you do it.
+- **Edit a running plan:** rename it, change shift times, add or remove shifts, and extend the end date.
+- **Pause** for a few days (illness, travel) or until you resume. Paused days have no shifts and never break the streak. Optionally push the end date back by the paused days.
+- Day-by-day table and calendar strip for every plan.
 
-### Goal types
+### Other goals
+- Habits (daily, weekly, monthly; daily habits can be limited to chosen weekdays) and one-time deadlines.
+- Archive to keep history, or delete forever (you must type the goal's name).
 
-- **Recurring goals:** Set a daily, weekly, or monthly goal. Daily goals can be limited to selected weekdays.
-- **Project goals:** Set a target completion date or choose a duration in months from today.
-- Add an optional subject tag, course target, and due date where applicable.
-- Mark goals complete, archive them to retain their history, or restore archived goals.
-- Overdue goals show how long they are past their deadline.
+### Streaks
+A day counts when you finish any shift or habit or save a note. Planned rest days (one per week), plan free days and days where every shift was skipped or moved cover a gap, up to 2 per month. Paused plans are always covered. The same rules are explained in the app under "How streaks work".
 
-### History
+### Reminders
+Notifications a few minutes before each shift. They work while the app is open with no setup. For reminders with the app closed, install it as an app on your phone and follow [REMINDERS_SETUP.md](./REMINDERS_SETUP.md).
 
-- Browse the activity calendar by month, including completed, missed, open, and planned rest days.
-- Plan up to one rest day per week.
-- Search and filter saved progress notes and completed goals by month or entry type.
-
-### Insights
-
-- Review weekly completed goals, active days, study time, and your best day.
-- Save a weekly reflection prompt.
-- View weekly goal-completion and study-time charts, monthly completion rates, and your strongest days.
-- See course-target progress, recent activity by goal and subject, upcoming deadlines, and goals that may need attention.
-- Use the subject filter to focus supported insights on a selected tag.
+### History and Insights
+- Search past notes and everything you finished (habits and shifts).
+- Weekly review, goals and study time per week, strongest days, completion rate, subject and course progress, deadlines, goals that need attention.
 
 ## Getting started
 
-### Requirements
-
-- Node.js and npm
-- A Supabase project with email authentication enabled
-
-### Install and run locally
+Requirements: Node.js, npm and a Supabase project with email auth enabled.
 
 ```sh
 npm install
 npm run dev
 ```
 
-Create a `.env` file in the project root with the Supabase project URL and anon key:
+Create `.env` in the project root:
 
 ```dotenv
 VITE_SUPABASE_URL=https://your-project.supabase.co
 VITE_SUPABASE_ANON_KEY=your-anon-key
+# optional, for closed-app reminders
+VITE_VAPID_PUBLIC_KEY=
 ```
 
-The app uses Supabase Auth for sign-up and sign-in. Email verification redirects back to the app's current origin. Add the local and deployed app URLs to the Supabase Auth URL configuration as appropriate.
+Add your local and deployed URLs to Supabase Auth > URL configuration.
 
-### Set up the database
+### Database
+- **New database:** run [schema.sql](./schema.sql). It contains everything.
+- **Existing database:** run [study_plans_migration.sql](./study_plans_migration.sql) once. It is safe to run again and replaces the older `add_archived_at` and `goal_and_independent_timer` migrations. The app shows a message at the top if a table or column is missing.
 
-For a new Supabase database, run [schema.sql](./schema.sql) in the Supabase SQL Editor.
-
-For a database created using an earlier version of the schema:
-
-1. Run [add_archived_at_migration.sql](./add_archived_at_migration.sql) if it has not already been applied.
-2. Run [goal_and_independent_timer_migration.sql](./goal_and_independent_timer_migration.sql) to support project goals and independent study timer sessions.
-
-The timer's current session is kept in the browser so it can continue across navigation and page reloads. Stopped study sessions are saved to Supabase and appear in Insights.
+## Install on your phone
+Deploy over HTTPS, then Add to Home Screen (iPhone: Safari > Share > Add to Home Screen). The app ships a web manifest, icons and a small service worker (no caching, so updates are immediate).
 
 ## Commands
 
 ```sh
-npm run dev      # Start the local development server
-npm run build    # Create a production build
-npm run preview  # Preview the production build locally
+npm run dev      # local development server
+npm run build    # production build
+npm run preview  # preview the production build
 ```
