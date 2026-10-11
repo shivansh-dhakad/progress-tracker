@@ -63,7 +63,10 @@ create table time_entries (
   goal_id uuid references goals on delete cascade,   -- null = independent study session
   slot_idx int,                                       -- set when the session was counted against a plan shift
   seconds int not null,
-  log_date date not null
+  log_date date not null,
+  note text,                                          -- what you studied in this session
+  started_at timestamptz,
+  ended_at timestamptz
 );
 
 create table reviews (

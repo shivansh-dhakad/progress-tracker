@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { supabase } from './supabase'
-import { PlanToday, PlanProgress, StudyWeek, FocusOverlay, ShiftRow, planInfo, shiftsOn, freeToday, pausedToday, localDate, shiftMinutes, formatTime } from './plans.jsx'
+import { PlanToday, PlanProgress, StudyWeek, FocusOverlay, ShiftRow, planInfo, shiftsOn, freeToday, pausedToday, localDate, shiftMinutes, formatTime, shiftInfo, studiedOn } from './plans.jsx'
 import { SettingsPanel, useShiftReminders } from './reminders.jsx'
 import { NewSheet } from './newgoal.jsx'
 
@@ -18,6 +18,8 @@ const dow = (d) => (d.getDay() + 6) % 7
 const longDate = (s) => parse(s).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
 const hm = (s) => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h ? `${h}h ${m}m` : `${m}m` }
 const clock = (s) => [s / 3600, (s % 3600) / 60, s % 60].map((n) => String(Math.floor(n)).padStart(2, '0')).join(':')
+const shortDate = (s) => parse(s).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
+const clockTime = (iso) => (iso ? new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) : '')
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 const PERIODS = ['daily', 'weekly', 'monthly', 'project']
@@ -56,7 +58,7 @@ export default function Tracker() {
   const load = useCallback(async () => {
     const q = (t, c) => supabase.from(t).select(c)
     const [g, c, l, r, t, v, sl, us] = await Promise.all([q('goals', '*').order('created_at'), q('completions', 'goal_id,done_on'),
-      q('logs', 'log_date,note'), q('rest_days', 'day'), q('time_entries', 'goal_id,seconds,log_date,slot_idx'), q('reviews', 'week_start,note'),
+      q('logs', 'log_date,note'), q('rest_days', 'day'), q('time_entries', 'id,goal_id,seconds,log_date,slot_idx,note,started_at,ended_at'), q('reviews', 'week_start,note'),
       q('slot_completions', 'goal_id,done_on,slot_idx,status,moved_to,moved_done,topic,note'), q('user_settings', '*')])
     const bad = [g, c, t, sl, us].find((x) => x.error)
     setNotice(bad ? `Could not load everything (${bad.error.message}). Run study_plans_migration.sql in the Supabase SQL Editor, then refresh.` : '')
@@ -238,34 +240,39 @@ export default function Tracker() {
   const overlaps = (from, to, date) => shiftsOn(live, slots, date).filter((x) => !x.it.done).map((x) => ({
     ...x, ov: Math.max(0, Math.min(to, atTime(date, x.it.e)) - Math.max(from, atTime(date, x.it.s))),
   })).filter((x) => x.ov > 0)
-  /* Stop: if the session overlapped a planned shift, ask before saving */
+  /* Stop: the session is always saved on its own (it never depends on a shift). We ask what you studied,
+     and offer to tick any planned shift the session mostly covered. */
   const stopTimer = () => {
     if (!timer || timerSaveInFlight.current || stopPrompt) return
     const endAt = Date.now(), seconds = elapsedAt(endAt)
-    const matches = overlaps(timer.sessionStart ?? endAt - seconds * 1000, endAt, timer.logDate)
-    if (seconds > 0 && matches.length) {
-      saveTimer({ ...timer, elapsedSeconds: seconds, startedAt: null })
-      setStopPrompt({ seconds, matches, picked: new Set(matches.map((m) => m.g.id + ':' + (m.it.from || '') + ':' + m.it.idx)) })
-    } else finishStop(seconds, [])
+    const startAt = timer.sessionStart ?? endAt - seconds * 1000
+    if (seconds <= 0) return finishStop({ seconds: 0, picked: [], note: '', startAt, endAt })
+    const matches = overlaps(startAt, endAt, timer.logDate)
+    saveTimer({ ...timer, elapsedSeconds: seconds, startedAt: null })
+    setStopPrompt({
+      seconds, startAt, endAt, matches, note: '',
+      picked: new Set(matches.filter((m) => m.ov >= (shiftMinutes(m.it.s, m.it.e) * 60000) / 2).map((m) => m.g.id + ':' + (m.it.from || '') + ':' + m.it.idx)),
+    })
   }
   const cancelStop = () => { setStopPrompt(null); resumeTimer() }
-  /* save the session; picked = shifts to mark done and count the time against */
-  const finishStop = async (seconds, picked) => {
+  /* save the session (with what you studied); picked = planned shifts to tick off as done */
+  const finishStop = async ({ seconds, picked, note, startAt, endAt }) => {
     if (timerSaveInFlight.current) return
     timerSaveInFlight.current = true
     try {
+      const text = (note || '').trim()
       if (seconds > 0) {
-        const total = picked.reduce((a, m) => a + m.ov, 0)
-        const rows = picked.length
-          ? picked.map((m, i) => ({
-              goal_id: m.g.id, slot_idx: m.it.idx, log_date: timer.logDate,
-              seconds: i === picked.length - 1 ? seconds - picked.slice(0, -1).reduce((a, x) => a + Math.round((seconds * x.ov) / total), 0) : Math.round((seconds * m.ov) / total),
-            })).filter((r) => r.seconds > 0)
-          : [{ goal_id: null, seconds, log_date: timer.logDate }]
-        const { error } = await supabase.from('time_entries').insert(rows)
+        const { error } = await supabase.from('time_entries').insert({
+          goal_id: null, seconds, log_date: timer.logDate, note: text || null,
+          started_at: new Date(startAt).toISOString(), ended_at: new Date(endAt).toISOString(),
+        })
         if (error) { setTimerError(`Could not save study time: ${error.message}`); setStopPrompt(null); return }
       }
-      for (const m of picked) await act.toggle(m.g, m.it, timer.logDate)
+      for (const m of picked) {
+        const extra = text ? { note: text } : {}
+        if (m.it.movedIn) await writeSlot(m.g, m.it.from, m.it.idx, { status: 'moved', moved_to: timer.logDate, moved_done: true, ...extra })
+        else await writeSlot(m.g, timer.logDate, m.it.idx, { status: 'done', ...extra })
+      }
       await load()
       setTimerError(''); setStopPrompt(null)
       saveTimer(null)
@@ -275,7 +282,10 @@ export default function Tracker() {
       timerSaveInFlight.current = false
     }
   }
-  const confirmStop = (markDone) => finishStop(stopPrompt.seconds, markDone ? stopPrompt.matches.filter((m) => stopPrompt.picked.has(m.g.id + ':' + (m.it.from || '') + ':' + m.it.idx)) : [])
+  const confirmStop = () => finishStop({
+    seconds: stopPrompt.seconds, startAt: stopPrompt.startAt, endAt: stopPrompt.endAt, note: stopPrompt.note,
+    picked: stopPrompt.matches.filter((m) => stopPrompt.picked.has(m.g.id + ':' + (m.it.from || '') + ':' + m.it.idx)),
+  })
 
   const todaySecs = times.filter((t) => t.log_date === todayStr).reduce((a, t) => a + t.seconds, 0) + (timer && timer.logDate === todayStr ? elapsed : 0)
   const wkStart = fmt(weekStart(today))
@@ -296,8 +306,11 @@ export default function Tracker() {
   const active = useMemo(() => {
     const s = new Set([...done.map((c) => c.done_on), ...slotDone.map((c) => c.done_on)])
     Object.entries(logs).forEach(([d, n]) => n.trim() && s.add(d))
+    const perDay = {}
+    times.forEach((t) => { perDay[t.log_date] = (perDay[t.log_date] || 0) + t.seconds })
+    Object.entries(perDay).forEach(([d, sec]) => { if (sec >= 60) s.add(d) })
     return s
-  }, [done, slotDone, logs])
+  }, [done, slotDone, logs, times])
   /* Paused days always keep the streak. Free days, and days where every shift was skipped or moved, keep it
      too, but only 2 per calendar month in total. */
   const { planRest, pausedRest } = useMemo(() => {
@@ -467,7 +480,7 @@ function Hero({ n, total, streak, longest, week, status, todayStr }) {
 }
 
 /* ---------- streak grid ---------- */
-function Streak({ today, todayStr, status, selected, onSelect, stats, done, goalMap, logs, rest, onRest, slotDone }) {
+function Streak({ today, todayStr, status, selected, onSelect, stats, done, goalMap, logs, rest, onRest, slotDone, times }) {
   const [restDate, setRestDate] = useState(todayStr)
   const [mo, setMo] = useState(0)
   const m = new Date(today.getFullYear(), today.getMonth() + mo, 1)
@@ -478,6 +491,7 @@ function Streak({ today, todayStr, status, selected, onSelect, stats, done, goal
   const titles = done.filter((c) => c.done_on === selected).map((c) => goalMap[c.goal_id]?.title).filter(Boolean)
     .concat(slotDone.filter((c) => c.done_on === selected).map((c) => c.label))
   const note = (logs[selected] || '').trim()
+  const sessions = times.filter((t) => t.log_date === selected && !t.goal_id && t.seconds > 0)
   const pick = (d) => { onSelect(d); setRestDate(d) }
   return (
     <section className="panel streak">
@@ -500,7 +514,7 @@ function Streak({ today, todayStr, status, selected, onSelect, stats, done, goal
       <details className="more streak-help">
         <summary>How streaks work</summary>
         <ul>
-          <li><b>A day counts</b> when you finish any shift or habit, or save a progress note.</li>
+          <li><b>A day counts</b> when you finish any shift or habit, save a progress note, or save a study-timer session (1 minute or more). That works on rest days and free days too.</li>
           <li><b>Missing a day</b> resets the streak, unless that day is covered below.</li>
           <li><b>Rest days</b> you plan yourself (one per week) bridge a gap but do not add to the count.</li>
           <li><b>Plan free days</b> and days where every shift was skipped or moved are covered too, up to 2 per month. Pick the days that matter.</li>
@@ -511,8 +525,9 @@ function Streak({ today, todayStr, status, selected, onSelect, stats, done, goal
       <div className="detail">
         <h3>{longDate(selected)}{selected === todayStr ? ' · today' : ''} <span className={`pill ${status(selected)}`}>{words[status(selected)]}</span></h3>
         {titles.length > 0 && <p className="chips">{titles.map((t, i) => <span className="chip" key={i}>✓ {t}</span>)}</p>}
+        {sessions.length > 0 && <p className="chips">{sessions.map((t, i) => <span className="chip" key={t.id || i}>⏱ {hm(t.seconds)}{t.note ? ` · ${t.note}` : ''}</span>)}</p>}
         {note && <p className="note">{note}</p>}
-        {!titles.length && !note && <p className="muted">Nothing recorded for this day.</p>}
+        {!titles.length && !note && !sessions.length && <p className="muted">Nothing recorded for this day.</p>}
         <div className="rest-plan">
           <button className="ghost" onClick={() => onRest(restDate)}>
             {rest.has(restDate) ? 'Cancel rest day' : 'Plan as rest day'}
@@ -625,32 +640,34 @@ function StudyTarget({ todaySecs, weekSecs, settings, timer, startTimer, onSetup
   )
 }
 
-/* ---------- Stop & save: ask which shifts this session completed ---------- */
+/* ---------- Stop & save: what did you study? (+ optionally tick shifts it covered) ---------- */
 function StopPrompt({ prompt, setPrompt, onSave, onCancel }) {
   if (!prompt) return null
   const keyOf = (m) => m.g.id + ':' + (m.it.from || '') + ':' + m.it.idx
   const flip = (k) => setPrompt((p) => { const picked = new Set(p.picked); picked.has(k) ? picked.delete(k) : picked.add(k); return { ...p, picked } })
   return (
     <div className="sheet-bg confirm-bg">
-      <div className="sheet" role="dialog" aria-modal="true" aria-label="Mark shifts as done">
+      <div className="sheet" role="dialog" aria-modal="true" aria-label="Save study session">
         <header className="sheet-head"><span /><strong>You studied {hm(prompt.seconds)}</strong><span /></header>
-        <p className="muted">{prompt.matches.length === 1 ? 'Mark this shift as done?' : 'Mark these shifts as done?'}</p>
-        <ul className="plain">
-          {prompt.matches.map((m) => (
-            <li key={keyOf(m)}>
-              <label className="check-line">
-                <input type="checkbox" checked={prompt.picked.has(keyOf(m))} onChange={() => flip(keyOf(m))} />
-                <span><b>{m.g.title}</b> <span className="muted">{formatTime(m.it.s)} – {formatTime(m.it.e)} · planned {hm(shiftMinutes(m.it.s, m.it.e) * 60)}</span></span>
-              </label>
-            </li>
-          ))}
-        </ul>
+        <label className="lbl">What did you study?
+          <textarea autoFocus rows={3} value={prompt.note} onChange={(e) => setPrompt((p) => ({ ...p, note: e.target.value }))}
+            placeholder="e.g. Positional encoding and multi-head attention" /></label>
+        {prompt.matches.length > 0 && <>
+          <p className="muted small">This session overlapped a planned shift. Tick any shift it completed:</p>
+          <ul className="plain">
+            {prompt.matches.map((m) => (
+              <li key={keyOf(m)}>
+                <label className="check-line">
+                  <input type="checkbox" checked={prompt.picked.has(keyOf(m))} onChange={() => flip(keyOf(m))} />
+                  <span><b>{m.g.title}</b> <span className="muted">{formatTime(m.it.s)} – {formatTime(m.it.e)}</span></span>
+                </label>
+              </li>
+            ))}
+          </ul>
+        </>}
         <div className="wiz-nav">
           <button type="button" className="link" onClick={onCancel}>Keep studying</button>
-          <span className="acts">
-            <button type="button" className="ghost" onClick={() => onSave(false)}>Just save time</button>
-            <button type="button" className="primary" onClick={() => onSave(true)}>{prompt.picked.size ? 'Mark done & save' : 'Save'}</button>
-          </span>
+          <button type="button" className="primary" onClick={onSave}>Save session</button>
         </div>
       </div>
     </div>
@@ -752,7 +769,7 @@ function Insights({ today, todayStr, goals, fgoals, live, fdone, ftimes, logs, r
   const fall = [...fdone, ...fslotDone] // habits and plan shifts
   const wd = fall.filter((c) => inR(c.done_on))
   const per = {}; wd.forEach((c) => (per[c.done_on] = (per[c.done_on] || 0) + 1))
-  const days = new Set([...slotDone.filter((c) => inR(c.done_on)).map((c) => c.done_on), ...Object.keys(per), ...Object.keys(logs).filter((d) => inR(d) && logs[d].trim())]).size
+  const days = new Set([...slotDone.filter((c) => inR(c.done_on)).map((c) => c.done_on), ...Object.keys(per), ...ftimes.filter((t) => inR(t.log_date) && t.seconds >= 60).map((t) => t.log_date), ...Object.keys(logs).filter((d) => inR(d) && logs[d].trim())]).size
   const best = Object.entries(per).sort((a, b) => b[1] - a[1])[0]
   const activeSessionSeconds = timer ? elapsed : 0
   const sessionInSelectedWeek = timer && timer.logDate >= ws && timer.logDate <= we ? activeSessionSeconds : 0
@@ -769,45 +786,6 @@ function Insights({ today, todayStr, goals, fgoals, live, fdone, ftimes, logs, r
   const currentWeekSeconds = ftimes.filter((t) => t.log_date >= currentWeekStart && t.log_date <= todayStr)
     .reduce((a, t) => a + t.seconds, 0) +
     (timer && timer.logDate >= currentWeekStart && timer.logDate <= todayStr ? activeSessionSeconds : 0)
-  const weekly = Array.from({ length: 8 }, (_, i) => {
-    const s = fmt(addDays(weekStart(today), -7 * (7 - i))), e = fmt(addDays(parse(s), 6))
-    return { l: `${MONTHS[parse(s).getMonth()]} ${parse(s).getDate()}`, v: fall.filter((c) => c.done_on >= s && c.done_on <= e).length }
-  })
-  const monthly = Array.from({ length: 6 }, (_, i) => {
-    const startDate = new Date(today.getFullYear(), today.getMonth() - (5 - i), 1)
-    const start = fmt(startDate)
-    const monthEnd = new Date(startDate.getFullYear(), startDate.getMonth() + 1, 0)
-    const end = fmt(i === 5 ? today : monthEnd)
-    const activeOn = (g, date) => {
-      const created = localDate(g.created_at) || start
-      const archived = localDate(g.archived_at)
-      return date >= created && (!archived || date <= archived)
-    }
-    const opportunities = new Set()
-    const completed = new Set()
-    fgoals.filter((g) => RECURRING.includes(g.period)).forEach((g) => {
-      for (let d = start; d <= end; d = fmt(addDays(parse(d), 1))) {
-        if (!activeOn(g, d)) continue
-        if (g.period === 'daily') {
-          if (!g.days?.length || g.days.includes(dow(parse(d)))) opportunities.add(`${g.id}:${d}`)
-        } else if (g.period === 'weekly') {
-          opportunities.add(`${g.id}:${fmt(weekStart(parse(d)))}`)
-        } else {
-          opportunities.add(`${g.id}:${d.slice(0, 7)}`)
-        }
-      }
-    })
-    fdone.forEach((c) => {
-      if (c.done_on < start || c.done_on > end) return
-      const g = fgoals.find((goal) => goal.id === c.goal_id)
-      if (!g || !activeOn(g, c.done_on)) return
-      if (g.period === 'daily' && g.days?.length && !g.days.includes(dow(parse(c.done_on)))) return
-      const period = g.period === 'daily' ? c.done_on : g.period === 'weekly' ? fmt(weekStart(parse(c.done_on))) : c.done_on.slice(0, 7)
-      completed.add(`${g.id}:${period}`)
-    })
-    const rate = opportunities.size ? Math.round((completed.size / opportunities.size) * 100) : 0
-    return { l: MONTHS[startDate.getMonth()], v: Math.min(100, rate) }
-  })
   const studyWeekly = Array.from({ length: 8 }, (_, i) => {
     const start = fmt(addDays(weekStart(today), -7 * (7 - i)))
     const end = fmt(addDays(parse(start), 6))
@@ -816,19 +794,6 @@ function Insights({ today, todayStr, goals, fgoals, live, fdone, ftimes, logs, r
     if (timer && timer.logDate >= start && timer.logDate <= end) seconds += activeSessionSeconds
     return { l: `${MONTHS[parse(start).getMonth()]} ${parse(start).getDate()}`, v: Math.round((seconds / 3600) * 10) / 10 }
   })
-  const recentStart = fmt(addDays(today, -29))
-  const recentCompletions = fall.filter((c) => c.done_on >= recentStart && c.done_on <= todayStr)
-  const recentGoals = {}
-  const recentTags = {}
-  recentCompletions.forEach((completion) => {
-    const goal = fgoals.find((g) => g.id === completion.goal_id)
-    if (!goal) return
-    recentGoals[goal.id] = { id: goal.id, title: goal.title, count: (recentGoals[goal.id]?.count || 0) + 1 }
-    const subject = goal.tag || 'Untagged'
-    recentTags[subject] = (recentTags[subject] || 0) + 1
-  })
-  const topGoals = Object.values(recentGoals).sort((a, b) => b.count - a.count).slice(0, 5)
-  const topTags = Object.entries(recentTags).sort((a, b) => b[1] - a[1]).slice(0, 5)
   const deadlineGoals = live.filter((g) => g.period !== 'plan' && g.due_date && !isDone(g))
     .map((g) => ({ ...g, daysLeft: Math.round((parse(g.due_date) - parse(todayStr)) / 864e5) }))
     .filter((g) => g.daysLeft <= 14)
@@ -837,13 +802,33 @@ function Insights({ today, todayStr, goals, fgoals, live, fdone, ftimes, logs, r
   const cut30 = fmt(addDays(today, -29)), cut14 = fmt(addDays(today, -14))
   const act30 = new Set([...fdone.filter((c) => c.done_on >= cut30).map((c) => c.done_on),
     ...fslotDone.filter((c) => c.done_on >= cut30 && c.done_on <= todayStr).map((c) => c.done_on),
+    ...ftimes.filter((t) => t.log_date >= cut30 && t.log_date <= todayStr && t.seconds >= 60).map((t) => t.log_date),
     ...Object.keys(logs).filter((d) => d >= cut30 && d <= todayStr && logs[d].trim())]).size
-  const wdCount = Array(7).fill(0)
-  fall.filter((c) => c.done_on >= fmt(addDays(today, -55))).forEach((c) => wdCount[dow(parse(c.done_on))]++)
-  const topDow = Math.max(...wdCount), byDow = DAYS.map((l, i) => ({ l, v: wdCount[i] }))
   const courses = live.filter((g) => g.target).map((g) => ({ g, n: fdone.filter((c) => c.goal_id === g.id).length }))
   const stalled = live.filter((g) => g.period !== 'plan' && (localDate(g.created_at) || '') < cut14 && !fdone.some((c) => c.goal_id === g.id && c.done_on >= cut14)).slice(0, 4)
-  const maxTag = Math.max(1, ...topTags.map((t) => t[1]))
+  /* completion rate per goal: shifts for a study plan; finished periods for a habit; done/open for a deadline.
+     The period that is still running (today, this week, this month) only counts once it is done. */
+  const goalRates = live.map((g) => {
+    if (g.period === 'plan') {
+      const i = planInfo(g, slots, todayStr), due = i.doneAll + i.missed
+      return { g, kind: 'Study plan', pct: due ? Math.round((i.doneAll / due) * 100) : null, detail: `${i.doneAll} of ${due} shifts done${i.left ? ` · ${i.left} to go` : ''}` }
+    }
+    const mine = fdone.filter((c) => c.goal_id === g.id)
+    if (g.period === 'project') {
+      const isFin = mine.length > 0
+      return { g, kind: 'Deadline', pct: isFin ? 100 : null, label: isFin ? 'Done' : 'Open', detail: g.due_date ? `Due ${shortDate(g.due_date)}` : 'No date' }
+    }
+    const keyOf = (d) => (g.period === 'daily' ? d : g.period === 'weekly' ? fmt(weekStart(parse(d))) : d.slice(0, 7))
+    const created = localDate(g.created_at) || todayStr, possible = new Set()
+    for (let d = created; d <= todayStr; d = fmt(addDays(parse(d), 1)))
+      if (!(g.period === 'daily' && g.days?.length && !g.days.includes(dow(parse(d))))) possible.add(keyOf(d))
+    const doneKeys = new Set(mine.map((c) => c.done_on).filter((d) => d >= created && !(g.period === 'daily' && g.days?.length && !g.days.includes(dow(parse(d))))).map(keyOf))
+    const current = keyOf(todayStr)
+    const total = possible.size - (possible.has(current) && !doneKeys.has(current) ? 1 : 0)
+    const hit = [...doneKeys].filter((k) => possible.has(k)).length
+    const unit = g.period === 'daily' ? 'days' : g.period === 'weekly' ? 'weeks' : 'months'
+    return { g, kind: g.period === 'daily' ? 'Daily habit' : g.period === 'weekly' ? 'Weekly habit' : 'Monthly habit', pct: total > 0 ? Math.min(100, Math.round((hit / total) * 100)) : null, detail: total > 0 ? `${hit} of ${total} ${unit}` : 'Just started' }
+  }).sort((a, b) => (a.g.period === 'plan' ? 0 : 1) - (b.g.period === 'plan' ? 0 : 1) || a.kind.localeCompare(b.kind))
   const dlt = currentWeekDone.length - previousWeekDone.length
   const save = async () => { await onSaveReview(ws, note); setSaved(true); setTimeout(() => setSaved(false), 1500) }
   return (
@@ -892,18 +877,18 @@ function Insights({ today, todayStr, goals, fgoals, live, fdone, ftimes, logs, r
 
       {view === 'trends' && <>
         <StudyWeek today={today} todayStr={todayStr} ftimes={ftimes} timer={timer} elapsed={elapsed} />
-        <div className="cols two">
-          <section className="panel"><h2>Study time per week</h2><Bars data={studyWeekly} unit="h" /></section>
-          <section className="panel"><h2>Goals per week</h2><Bars data={weekly} /></section>
-          <section className="panel"><h2>Your strongest days <small>8 weeks</small></h2><Bars data={byDow} />
-            {topDow > 0 && <p className="muted small">You finish most on {DAYS[wdCount.indexOf(topDow)]}s. Put your hardest goal there.</p>}</section>
-          <section className="panel"><h2>Completion rate <small>by month</small></h2><Bars data={monthly} unit="%" /><p className="muted small">Completed ÷ scheduled goals</p></section>
-        </div>
+        <section className="panel"><h2>Study time per week</h2><Bars data={studyWeekly} unit="h" /></section>
         <section className="panel">
-          <h2>By subject <small>last 30 days</small></h2>
-          {topTags.length ? <ul className="plain">{topTags.map(([name, count]) => <li key={name}>
-            <div className="grow"><span className="gt">{name}</span><div className="track"><i style={{ width: `${(count / maxTag) * 100}%` }} /></div></div><b className="cnt">{count}</b></li>)}</ul>
-            : <p className="muted small">Add a subject to your goals to compare where your effort goes.</p>}
+          <h2>Completion rate <small>per goal</small></h2>
+          {goalRates.length ? <ul className="plain">{goalRates.map((r) => <li key={r.g.id}>
+            <div className="grow">
+              <span className="gt">{r.g.title}</span>
+              <span className="meta"><em className="tag">{r.kind}</em><em className="due">{r.detail}</em></span>
+              <div className="track"><i style={{ width: `${r.pct ?? 0}%` }} /></div>
+            </div>
+            <b className="cnt">{r.label || (r.pct === null ? '–' : `${r.pct}%`)}</b></li>)}</ul>
+            : <p className="muted small">Add a study plan or habit to see its completion rate here.</p>}
+          <p className="muted small">Study plans: shifts done ÷ shifts due so far. Habits: finished days, weeks or months ÷ those that have passed.</p>
         </section>
         {courses.length > 0 && <section className="panel">
           <h2>Course progress <small>{courses.length} tracked</small></h2>
@@ -916,44 +901,154 @@ function Insights({ today, todayStr, goals, fgoals, live, fdone, ftimes, logs, r
   )
 }
 
-/* ---------- logs ---------- */
-function LogsTab({ todayStr, logs, done, goalMap, slotDone = [], tag, onSave, showProgress = true, showHistory = true }) {
+/* ---------- history: a day-by-day learning journal, grouped by week ---------- */
+function LogsTab({ today, todayStr, logs, done, goalMap, slots, times, tag, onSave }) {
   const [note, setNote] = useState(logs[todayStr] || ''), [saved, setSaved] = useState(false)
   const [q, setQ] = useState(''), [month, setMonth] = useState(''), [type, setType] = useState('all')
   const save = async () => { await onSave(note); setSaved(true); setTimeout(() => setSaved(false), 1500) }
-  const entries = useMemo(() => {
-    const by = {}, get = (d) => (by[d] ||= { date: d, note: '', goals: [] })
-    if (!tag) Object.entries(logs).forEach(([d, n]) => n.trim() && (get(d).note = n))
-    done.forEach((c) => { const g = goalMap[c.goal_id]; if (g && (!tag || g.tag === tag)) get(c.done_on).goals.push(g) })
-    slotDone.forEach((c) => { const g = goalMap[c.goal_id]; if (g && (!tag || g.tag === tag)) get(c.done_on).goals.push({ title: c.label, period: 'plan', tag: g.tag }) })
+
+  /* one record per day: shifts finished, extra study sessions, habits ticked, the day note, total time studied */
+  const days = useMemo(() => {
+    const by = {}, get = (d) => (by[d] ||= { date: d, note: '', shifts: [], sessions: [], habits: [], secs: 0 })
+    if (!tag) Object.entries(logs).forEach(([d, n]) => n.trim() && (get(d).note = n.trim()))
+    slots.forEach((c) => {
+      const g = goalMap[c.goal_id]
+      if (!g || (tag && g.tag !== tag)) return
+      const date = c.status === 'done' ? c.done_on : c.status === 'moved' && c.moved_done ? c.moved_to : null
+      if (!date) return
+      const meta = shiftInfo((g.schedule?.[dow(parse(c.done_on))] || [])[c.slot_idx])
+      get(date).shifts.push({
+        key: `${c.goal_id}:${c.done_on}:${c.slot_idx}`, title: g.title, s: meta.s, e: meta.e, topic: meta.topic,
+        note: (c.note || '').trim(), from: c.status === 'moved' ? c.done_on : null, studied: studiedOn(times, g.id, c.done_on, c.slot_idx),
+      })
+    })
+    done.forEach((c) => { const g = goalMap[c.goal_id]; if (g && (!tag || g.tag === tag)) get(c.done_on).habits.push(g) })
+    times.forEach((t) => {
+      if (t.seconds <= 0) return
+      const g = t.goal_id ? goalMap[t.goal_id] : null
+      if (tag && !(g && g.tag === tag)) return
+      const day = get(t.log_date)
+      day.secs += t.seconds
+      if (!t.goal_id) day.sessions.push({ key: t.id || `${t.log_date}:${t.started_at}`, secs: t.seconds, note: (t.note || '').trim(), start: t.started_at, end: t.ended_at })
+    })
+    Object.values(by).forEach((d) => {
+      d.shifts.sort((a, b) => a.s.localeCompare(b.s))
+      d.sessions.sort((a, b) => (a.start || '').localeCompare(b.start || ''))
+    })
     return Object.values(by).sort((a, b) => (a.date < b.date ? 1 : -1))
-  }, [logs, done, slotDone, goalMap, tag])
+  }, [logs, done, slots, times, goalMap, tag])
+
+  const byDate = useMemo(() => Object.fromEntries(days.map((d) => [d.date, d])), [days])
+  const noteCount = (e) => (e.note ? 1 : 0) + e.shifts.filter((x) => x.note).length + e.sessions.filter((x) => x.note).length
+  const cut = fmt(addDays(today, -29))
+  const recent = days.filter((d) => d.date >= cut)
+  const sum = { secs: recent.reduce((a, d) => a + d.secs, 0), shifts: recent.reduce((a, d) => a + d.shifts.length, 0), active: recent.length, notes: recent.reduce((a, d) => a + noteCount(d), 0) }
+  const last14 = Array.from({ length: 14 }, (_, i) => {
+    const d = fmt(addDays(today, i - 13)), e = byDate[d]
+    return { d, n: +d.slice(8), v: e ? Math.round(e.secs / 360) / 10 : 0 }
+  })
+  const maxV = Math.max(0.1, ...last14.map((b) => b.v))
+
   const s = q.trim().toLowerCase()
-  const shown = entries.filter((e) => (!month || e.date.startsWith(month)) && (type !== 'notes' || e.note) && (type !== 'goals' || e.goals.length)
-    && (!s || e.note.toLowerCase().includes(s) || e.goals.some((g) => g.title.toLowerCase().includes(s))))
+  const text = (e) => [e.note, ...e.shifts.flatMap((x) => [x.title, x.topic, x.note]), ...e.sessions.map((x) => x.note), ...e.habits.map((h) => h.title)].join(' ').toLowerCase()
+  const has = { shifts: (e) => e.shifts.length > 0, sessions: (e) => e.sessions.length > 0, notes: (e) => noteCount(e) > 0, habits: (e) => e.habits.length > 0 }
+  const shown = days.filter((e) => (!month || e.date.startsWith(month)) && (type === 'all' || has[type](e)) && (!s || text(e).includes(s)))
+  const weeks = []
+  shown.forEach((e) => {
+    const k = fmt(weekStart(parse(e.date)))
+    let w = weeks[weeks.length - 1]
+    if (!w || w.key !== k) weeks.push((w = { key: k, days: [] }))
+    w.days.push(e)
+  })
+  const thisWeek = fmt(weekStart(today)), lastWeek = fmt(addDays(weekStart(today), -7))
+  const weekName = (k) => (k === thisWeek ? 'This week' : k === lastWeek ? 'Last week' : `Week of ${parse(k).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`)
+  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`
+
   return (
     <div className="stack">
-      {showProgress && <section className="panel progress-entry">
+      <section className="panel progress-entry">
         <h2>Enter today’s progress</h2>
         <textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)} placeholder="What did you work on or learn today?" />
         <button className="primary" onClick={save}>{saved ? 'Saved ✓' : 'Save today’s progress'}</button>
-      </section>}
-      {showHistory && <section className="panel">
-        <h2>Previous logs <small>{shown.length} of {entries.length}{tag ? ` · ${tag}` : ''}</small></h2>
+      </section>
+
+      <section className="panel">
+        <h2>Last 30 days{tag ? ` · ${tag}` : ''}</h2>
+        <div className="hsum">
+          <div><b>{hm(sum.secs)}</b><span>studied</span></div>
+          <div><b>{sum.shifts}</b><span>shifts finished</span></div>
+          <div><b>{sum.active}</b><span>days with activity</span></div>
+          <div><b>{sum.notes}</b><span>things you wrote down</span></div>
+        </div>
+        <div className="bars hbars" role="img" aria-label="Hours studied per day, last 14 days">
+          {last14.map((b) => <div key={b.d} className={b.d === todayStr ? 'now' : ''}><b>{b.v || ''}</b>
+            <div className="col"><i style={{ height: `${(b.v / maxV) * 100}%`, opacity: b.v ? 1 : 0 }} /></div><small>{b.n}</small></div>)}
+        </div>
+        <p className="muted small">Hours studied per day, last 14 days.</p>
+      </section>
+
+      <section className="panel">
+        <h2>Journal <small>{shown.length} of {days.length} days</small></h2>
         <div className="filters">
-          <input placeholder="Search logs and goals" value={q} onChange={(e) => setQ(e.target.value)} />
+          <input placeholder="Search topics, notes and goals" value={q} onChange={(e) => setQ(e.target.value)} />
           <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} aria-label="Filter by month" />
-          <select value={type} onChange={(e) => setType(e.target.value)}><option value="all">All entries</option><option value="notes">With a note</option><option value="goals">With goals done</option></select>
+          <select value={type} onChange={(e) => setType(e.target.value)} aria-label="Show">
+            <option value="all">Everything</option><option value="shifts">Plan shifts</option><option value="sessions">Study sessions</option>
+            <option value="notes">Only days with notes</option><option value="habits">Habits &amp; goals</option>
+          </select>
           {(q || month || type !== 'all') && <button className="link" onClick={() => { setQ(''); setMonth(''); setType('all') }}>Clear</button>}
         </div>
-        <ul className="plain history">
-          {shown.map((e) => (
-            <li key={e.date}><div><b>{longDate(e.date)}</b>{e.note && <p className="note">{e.note}</p>}
-              {e.goals.length > 0 && <p className="chips">{e.goals.map((g, i) => <span key={i} className="chip">✓ {g.title}</span>)}</p>}</div></li>
-          ))}
-          {!shown.length && <li className="muted">{entries.length ? 'No entries match these filters.' : 'No logs yet. Save your first one above.'}</li>}
-        </ul>
-      </section>}
+        {weeks.map((w, wi) => {
+          const secs = w.days.reduce((a, d) => a + d.secs, 0), shifts = w.days.reduce((a, d) => a + d.shifts.length, 0)
+          return (
+            <details className="hweek" key={w.key} open={wi < 2 || !!s}>
+              <summary>{weekName(w.key)}<span>{[secs > 0 && hm(secs), shifts > 0 && plural(shifts, 'shift'), plural(w.days.length, 'active day')].filter(Boolean).join(' · ')}</span></summary>
+              {w.days.map((e) => (
+                <article className="hday" key={e.date}>
+                  <header>
+                    <b>{shortDate(e.date)}{e.date === todayStr ? ' · today' : ''}</b>
+                    <span className="hpills">
+                      {e.secs > 0 && <em className="hpill time">⏱ {hm(e.secs)}</em>}
+                      {e.shifts.length > 0 && <em className="hpill">{plural(e.shifts.length, 'shift')}</em>}
+                      {e.sessions.length > 0 && <em className="hpill">{plural(e.sessions.length, 'session')}</em>}
+                      {e.habits.length > 0 && <em className="hpill">{plural(e.habits.length, 'habit')}</em>}
+                    </span>
+                  </header>
+                  {e.shifts.length > 0 && <>
+                    <span className="hlabel">Plan shifts</span>
+                    <ul className="hlist">{e.shifts.map((x) => (
+                      <li className="hitem" key={x.key}>
+                        <span className="hrow"><b>{x.title}</b>{x.s && <span className="muted small">{formatTime(x.s)} – {formatTime(x.e)}</span>}
+                          {x.topic && <em className="tag">{x.topic}</em>}{x.from && <em className="due">moved from {shortDate(x.from)}</em>}</span>
+                        {x.note ? <p className="note learned">{x.note}</p> : <p className="muted small">No note for this shift.</p>}
+                        {x.studied > 0 && <span className="muted small">{hm(x.studied)} on the timer</span>}
+                      </li>))}
+                    </ul>
+                  </>}
+                  {e.sessions.length > 0 && <>
+                    <span className="hlabel">Study sessions</span>
+                    <ul className="hlist">{e.sessions.map((x) => (
+                      <li className="hitem" key={x.key}>
+                        <span className="hrow"><b>{hm(x.secs)}</b>{x.start && x.end && <span className="muted small">{clockTime(x.start)} – {clockTime(x.end)}</span>}</span>
+                        {x.note ? <p className="note learned">{x.note}</p> : <p className="muted small">No note for this session.</p>}
+                      </li>))}
+                    </ul>
+                  </>}
+                  {e.habits.length > 0 && <>
+                    <span className="hlabel">Habits &amp; goals</span>
+                    <p className="chips">{e.habits.map((g) => <span key={g.id} className="chip">✓ {g.title}</span>)}</p>
+                  </>}
+                  {e.note && <>
+                    <span className="hlabel">Day note</span>
+                    <p className="note">{e.note}</p>
+                  </>}
+                </article>
+              ))}
+            </details>
+          )
+        })}
+        {!shown.length && <p className="muted">{days.length ? 'Nothing matches these filters.' : 'Nothing yet. Finish a shift or save a study session and it will show up here.'}</p>}
+      </section>
     </div>
   )
 }

@@ -131,6 +131,7 @@ export function ShiftRow({ g, it, date, todayStr, nowHm, times, act, maxDate, sh
   const [open, setOpen] = useState(false)
   const [to, setTo] = useState('')
   const [note, setNote] = useState(it.savedNote || '')
+  const [noting, setNoting] = useState(false)
   const off = it.st === 'skipped' || it.st === 'moved'
   const studied = studiedOn(times, g.id, date, it.idx), planned = shiftMinutes(it.s, it.e) * 60
   const [txt, cls] = it.st === 'skipped' ? ['Skipped on purpose', 'skip']
@@ -144,10 +145,13 @@ export function ShiftRow({ g, it, date, todayStr, nowHm, times, act, maxDate, sh
   const close = () => { setOpen(false); setTo('') }
   const label = `${g.title}, ${formatTime(it.s)} to ${formatTime(it.e)}`
   useEffect(() => { setNote(it.savedNote || '') }, [it.savedNote])
+  /* ticking a shift marks it done and opens the "what did you learn?" box; unticking just undoes it */
+  const onCheck = () => { setNoting(!it.done); act.toggle(g, it, date) }
+  const saveLearned = async () => { await act.saveNote(g, it.movedIn ? it.from : date, it.idx, note); setNoting(false) }
   return (
     <li className={`goal-item ${it.done ? 'completed' : ''} ${off ? 'off' : ''}`}>
       <button className="check" aria-pressed={it.done} disabled={date > todayStr || it.st === 'moved' || it.st === 'missed'}
-        aria-label={`${it.done ? 'Undo completion' : 'Mark complete'} ${label}`} onClick={() => act.toggle(g, it, date)}><Tick /></button>
+        aria-label={`${it.done ? 'Undo completion' : 'Mark complete'} ${label}`} onClick={onCheck}><Tick /></button>
       <div className="grow">
         <span className="gt">{showTitle ? g.title : `${formatTime(it.s)} – ${formatTime(it.e)}`}</span>
         <span className="meta">
@@ -157,7 +161,18 @@ export function ShiftRow({ g, it, date, todayStr, nowHm, times, act, maxDate, sh
           {it.movedIn && <em className="due">from {niceDate(it.from)}</em>}
           {showTitle && g.tag && <em className="tag">{g.tag}</em>}
         </span>
-        {it.done && it.savedNote && <span className="studied">{it.savedNote}</span>}
+        {it.done && (noting
+          ? <div className="note-box">
+              <label className="lbl">What did you learn in this shift?
+                <textarea autoFocus rows={3} value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. Positional encoding: sinusoidal vs learned" /></label>
+              <div className="acts">
+                <button type="button" className="primary" onClick={saveLearned}>Save</button>
+                <button type="button" className="link" onClick={() => { setNote(it.savedNote || ''); setNoting(false) }}>{it.savedNote ? 'Cancel' : 'Skip for now'}</button>
+              </div>
+            </div>
+          : it.savedNote
+            ? <span className="learned-line">📝 {it.savedNote} <button type="button" className="link add-note" onClick={() => setNoting(true)}>Edit</button></span>
+            : <button type="button" className="link add-note" onClick={() => setNoting(true)}>+ What did you learn?</button>)}
         {studied > 0 && <span className="studied"><span className="prog-line"><i style={{ width: `${Math.min(100, (studied / planned) * 100)}%` }} /></span>{hm(studied)} of {hm(planned)} studied</span>}
         {open && (
           <div className="shift-menu">
@@ -173,12 +188,6 @@ export function ShiftRow({ g, it, date, todayStr, nowHm, times, act, maxDate, sh
               <button className="ghost" onClick={() => { act.skip(g, it, date); close() }}>Skip on purpose</button>
               {!it.movedIn && date <= todayStr && <button className="ghost" onClick={() => { act.miss(g, it, date); close() }}>Mark as missed</button>}
             </>}
-            {it.done && act.saveNote && (
-              <div className="note-box">
-                <label className="lbl">What did you do here?<textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3} placeholder="e.g. Revised LSTM, RNN and GRU" /></label>
-                <button className="ghost" onClick={() => { act.saveNote(g, it.movedIn ? it.from : date, it.idx, note); close() }}>Save what I learned</button>
-              </div>
-            )}
           </div>
         )}
       </div>
@@ -518,7 +527,7 @@ export function PlanProgress({ goals, slots, todayStr }) {
                     if (!d.items.length) return <td key={i} className="c rest" title={d.state === 'paused' ? 'Plan paused' : 'Free day'}><span>–</span></td>
                     const it = d.items[i]
                     if (!it) return <td key={i} className="c none" />
-                    const [sym, cls] = it.st === 'skipped' ? ['⊘', 'skip'] : it.st === 'moved' ? ['↷', 'skip'] : it.st === 'missed' || past ? ['✗', 'bad'] : it.done ? ['✓', 'ok'] : ['·', 'wait']
+                    const [sym, cls] = it.done ? ['✓', 'ok'] : it.st === 'skipped' ? ['⊘', 'skip'] : it.st === 'moved' ? ['↷', 'skip'] : it.st === 'missed' || past ? ['✗', 'bad'] : ['·', 'wait']
                     const note = it.st === 'skipped' ? ' · skipped on purpose' : it.st === 'moved' ? ` · moved to ${niceDate(it.movedTo)}` : it.movedIn ? ` · moved from ${niceDate(it.from)}` : ''
                     return <td key={i} className={`c ${cls}`} title={`${formatTime(it.s)} – ${formatTime(it.e)}${note}`}><span>{sym}</span><small>{formatTime(it.s)}–{formatTime(it.e)}</small></td>
                   })}

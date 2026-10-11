@@ -8,7 +8,8 @@ Streakbook is a personal study and goal tracker. Plan study shifts, tick them of
 - Today's list: timed study-plan shifts first, then daily habits. Weekly and monthly goals sit in a fold below.
 - Streak, today's progress ring and the week at a glance.
 - **Study-time target:** set hours per day and per week in Settings; the dashboard shows a progress ring and weekly bar.
-- **Study timer:** start, pause, resume, or stop and save. Stopping during a planned shift asks "Mark this shift as done?" and counts the time against that shift ("1h 20m of 2h studied"). The timer is saved on the device it runs on.
+- **Study timer:** start, pause, resume, or stop and save. The timer counts all your studying, whether or not it falls inside a shift. On stop it asks what you studied and saves the session with that note. If the session mostly covered a planned shift you can tick that shift as done in the same step. The timer is saved on the device it runs on.
+- **Shift notes:** ticking a shift as done asks what you learned in it. You can edit the note later from the shift row.
 
 ### Study plans
 - Create a plan with a start date, length and weekly shifts (for example 2 shifts a day, Sunday free).
@@ -22,13 +23,13 @@ Streakbook is a personal study and goal tracker. Plan study shifts, tick them of
 - Archive to keep history, or delete forever (you must type the goal's name).
 
 ### Streaks
-A day counts when you finish any shift or habit or save a note. Planned rest days (one per week), plan free days and days where every shift was skipped or moved cover a gap, up to 2 per month. Paused plans are always covered. The same rules are explained in the app under "How streaks work".
+A day counts when you finish any shift or habit, save a note, or save a timer session of a minute or more (this works on rest and free days too). Planned rest days (one per week), plan free days and days where every shift was skipped or moved cover a gap, up to 2 per month. Paused plans are always covered. The same rules are explained in the app under "How streaks work".
 
 ### Reminders
 Notifications a few minutes before each shift. They work while the app is open with no setup. For reminders with the app closed, install it as an app on your phone and follow [REMINDERS_SETUP.md](./REMINDERS_SETUP.md).
 
 ### History and Insights
-- Search past notes and everything you finished (habits and shifts).
+- **History** is a journal grouped by week: for each day you see shifts finished (with what you learned), extra timer sessions (with times and notes), habits ticked, the day note and total time studied, plus a 30-day summary and a 14-day study chart. Search by topic and filter by month or type.
 - Weekly review, goals and study time per week, strongest days, completion rate, subject and course progress, deadlines, goals that need attention.
 
 ## Getting started
