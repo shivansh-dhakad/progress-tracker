@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import './plan.css'
+import Icon from './icons.jsx'
 
 const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 const parse = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d) }
@@ -149,13 +150,14 @@ export function ShiftRow({ g, it, date, todayStr, nowHm, times, act, maxDate, sh
   const onCheck = () => { setNoting(!it.done); act.toggle(g, it, date) }
   const saveLearned = async () => { await act.saveNote(g, it.movedIn ? it.from : date, it.idx, note); setNoting(false) }
   return (
-    <li className={`goal-item ${it.done ? 'completed' : ''} ${off ? 'off' : ''}`}>
+    <li className={`goal-item ${it.done ? 'completed' : ''} ${off ? 'off' : ''} ${cls === 'now' && !it.done ? 'live' : ''}`}>
       <button className="check" aria-pressed={it.done} disabled={date > todayStr || it.st === 'moved' || it.st === 'missed'}
         aria-label={`${it.done ? 'Undo completion' : 'Mark complete'} ${label}`} onClick={onCheck}><Tick /></button>
       <div className="grow">
+        {showTitle && <span className="shift-top"><span className="time-pill">{formatTime(it.s)} – {formatTime(it.e)}</span>
+          <span className="dur">{cls === 'now' && !it.done && <><Icon name="flame" fill size={13} /> Live · </>}{hm(planned)}</span></span>}
         <span className="gt">{showTitle ? g.title : `${formatTime(it.s)} – ${formatTime(it.e)}`}</span>
         <span className="meta">
-          {showTitle && <em className="due">{formatTime(it.s)} – {formatTime(it.e)}</em>}
           <em className={`slot-st ${cls}`}>{txt}</em>
           {it.topic && <em className="tag">{it.topic}</em>}
           {it.movedIn && <em className="due">from {niceDate(it.from)}</em>}
@@ -486,60 +488,193 @@ export function PlanWizard({ tags, onAdd }) {
   )
 }
 
-/* ---------- insights: study plan table (rows = dates, columns = shifts) ---------- */
+/* ---------- insights: study plan analysis (pace, weekdays, time of day, weeks) + day-by-day table ---------- */
+const bucketOf = (t) => { const h = Number((t || '0').split(':')[0]); return h < 12 ? 'Morning' : h < 17 ? 'Afternoon' : 'Evening' }
+const pctOf = (a, b) => (b ? Math.round((a / b) * 100) : null)
+const mondayOf = (s) => fmt(addDays(parse(s), -dow(parse(s))))
+
+function planStats(info, todayStr) {
+  const wk = Array.from({ length: 7 }, () => ({ due: 0, done: 0 }))
+  const tod = { Morning: { due: 0, done: 0 }, Afternoon: { due: 0, done: 0 }, Evening: { due: 0, done: 0 } }
+  const weeks = [], topics = {}
+  let minsDone = 0, minsPlanned = 0, workLeft = 0, perfect = 0, run = 0, bestRun = 0, activeDays = 0
+  info.days.forEach((d) => {
+    const due = d.items.filter((x) => x.movedIn || x.st === 'pending' || x.st === 'done' || x.st === 'missed')
+    const past = d.date < todayStr || (d.date === todayStr && d.state === 'hit')
+    const mk = mondayOf(d.date)
+    let w = weeks[weeks.length - 1]
+    if (!w || w.key !== mk) weeks.push((w = { key: mk, due: 0, done: 0, missed: 0, left: 0, mins: 0 }))
+    due.forEach((x) => {
+      const m = shiftMinutes(x.s, x.e)
+      minsPlanned += m
+      w.due++
+      if (x.done) { minsDone += m; w.done++; w.mins += m; if (x.topic) topics[x.topic] = (topics[x.topic] || 0) + 1 }
+      else if (d.date < todayStr || x.st === 'missed') w.missed++
+      else w.left++
+      if (past || x.done) {
+        const dw = dow(parse(d.date)), b = tod[bucketOf(x.s)]
+        wk[dw].due++; b.due++
+        if (x.done) { wk[dw].done++; b.done++ }
+      }
+    })
+    if (due.length && d.date >= todayStr) workLeft++
+    if (due.length && past) {
+      activeDays++
+      if (d.state === 'hit') { perfect++; run++; bestRun = Math.max(bestRun, run) } else run = 0
+    }
+  })
+  return { wk, tod, weeks, topics: Object.entries(topics).sort((a, b) => b[1] - a[1]).slice(0, 6), minsDone, minsPlanned, workLeft, perfect, run, bestRun, activeDays }
+}
+
+function RateBars({ rows }) {
+  return (
+    <div className="rbars">
+      {rows.map((r) => (
+        <div key={r.l} className={r.due ? '' : 'none'} title={r.due ? `${r.done} of ${r.due} shifts done` : 'No shifts yet'}>
+          <b>{r.due ? `${pctOf(r.done, r.due)}%` : '–'}</b>
+          <div className="col"><i className={r.due && r.done / r.due < 0.5 ? 'low' : ''} style={{ height: `${r.due ? Math.max(4, (r.done / r.due) * 100) : 0}%` }} /></div>
+          <small>{r.l}</small>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export function PlanProgress({ goals, slots, todayStr }) {
   const plans = goals.filter((g) => g.period === 'plan')
-  const [id, setId] = useState(null)
+  const [id, setId] = useState(null), [filter, setFilter] = useState('all')
   const g = plans.find((x) => x.id === id) || plans.find((x) => !x.archived) || plans[0]
   const box = useRef(null)
   useEffect(() => {
     const el = box.current, row = el?.querySelector('tr.today')
     if (el && row) el.scrollTop = Math.max(0, row.offsetTop - el.querySelector('thead').offsetHeight - 48)
-  }, [g?.id])
-  if (!plans.length) return <section className="panel"><h2>Study plan progress</h2><p className="muted">No study plan yet. Use “+ New” at the top to create one, and its day-by-day table will appear here.</p></section>
+  }, [g?.id, filter])
+  if (!plans.length) return <section className="panel"><h2>Study plan progress</h2><p className="muted">No study plan yet. Use the New button to create one, and its analysis will appear here.</p></section>
   const info = planInfo(g, slots, todayStr)
+  const st = planStats(info, todayStr)
   const cols = info.maxItems
   const due = info.doneAll + info.missed
+  const onTrack = pctOf(info.doneAll, due)
+  const bestPossible = pctOf(info.totalAll - info.missed, info.totalAll)
+  const projected = info.totalAll ? Math.round(((info.doneAll + info.left * ((onTrack ?? 100) / 100)) / info.totalAll) * 100) : null
+  const daysLeft = Math.max(0, daysBetween(todayStr, info.end) + 1)
+  const wkRows = st.wk.map((x, i) => ({ ...x, l: DAYS[i] }))
+  const todRows = ['Morning', 'Afternoon', 'Evening'].map((k) => ({ ...st.tod[k], l: k }))
+  const ranked = wkRows.filter((x) => x.due >= 2).sort((a, b) => b.done / b.due - a.done / a.due)
+  const bestDay = ranked[0], worstDay = ranked.length > 1 ? ranked[ranked.length - 1] : null
+  const todRank = todRows.filter((x) => x.due >= 2).sort((a, b) => b.done / b.due - a.done / a.due)
+  const tips = []
+  if (!info.totalAll) tips.push('Add shifts to this plan to see analysis.')
+  else if (todayStr < info.start) tips.push(`This plan starts on ${niceDate(info.start)}. Insights appear once shifts are due.`)
+  else {
+    if (info.missed === 0 && info.doneAll > 0) tips.push('No missed shifts so far. Keep the rhythm.')
+    else if (info.missed > 0) tips.push(`${info.missed} missed ${info.missed === 1 ? 'shift' : 'shifts'}: the best you can now finish at is ${bestPossible}%. Move or re-plan upcoming shifts rather than skipping them.`)
+    if (bestDay && worstDay && bestDay.l !== worstDay.l && bestDay.done / bestDay.due - worstDay.done / worstDay.due >= 0.25)
+      tips.push(`${bestDay.l} is your strongest day (${pctOf(bestDay.done, bestDay.due)}%); ${worstDay.l} is your weakest (${pctOf(worstDay.done, worstDay.due)}%). Consider a lighter ${worstDay.l}.`)
+    if (todRank.length > 1 && todRank[0].l !== todRank[todRank.length - 1].l && todRank[0].done / todRank[0].due - todRank[todRank.length - 1].done / todRank[todRank.length - 1].due >= 0.25)
+      tips.push(`You finish ${todRank[0].l.toLowerCase()} shifts most often (${pctOf(todRank[0].done, todRank[0].due)}%) and ${todRank[todRank.length - 1].l.toLowerCase()} shifts least (${pctOf(todRank[todRank.length - 1].done, todRank[todRank.length - 1].due)}%).`)
+    if (st.run >= 3) tips.push(`${st.run} perfect days in a row.`)
+  }
+  const rowsShown = info.days.filter((d) => filter === 'all' ? true
+    : filter === 'attention' ? (d.state === 'miss' || d.state === 'partial')
+    : d.date >= todayStr && d.items.length > 0)
+  const seg = (v, tone) => ({ width: `${info.totalAll ? (v / info.totalAll) * 100 : 0}%`, tone })
+
   return (
-    <section className="panel">
-      <h2>Study plan progress
-        {plans.length > 1 && <select className="plan-pick" value={g.id} onChange={(e) => setId(e.target.value)} aria-label="Choose plan">
-          {plans.map((x) => <option key={x.id} value={x.id}>{x.title}{x.archived ? ' (archived)' : ''}</option>)}</select>}
-      </h2>
-      <p className="plan-sum"><b>{g.title}</b> · {niceDate(info.start)} → {niceDate(info.end)}</p>
-      <div className="stats">
-        <div><b>{info.doneAll}</b><span>done</span></div>
-        <div><b className="bad">{info.missed}</b><span>missed</span></div>
-        <div><b>{info.left}</b><span>to go</span></div>
-        <div><b>{info.skipped}</b><span>skipped or moved</span></div>
-        <div><b>{due ? Math.round((info.doneAll / due) * 100) : 0}%</b><span>on track</span></div>
-      </div>
-      <div className="ptable-wrap" ref={box}>
-        <table className="ptable">
-          <thead><tr><th>Date</th>{Array.from({ length: cols }, (_, i) => <th key={i}>Shift {i + 1}</th>)}<th>Day</th></tr></thead>
-          <tbody>
-            {info.days.map((d) => {
-              const past = d.date < todayStr
-              return (
-                <tr key={d.date} className={d.date === todayStr ? 'today' : ''}>
-                  <th scope="row">{niceDate(d.date)}</th>
-                  {Array.from({ length: cols }, (_, i) => {
-                    if (!d.items.length) return <td key={i} className="c rest" title={d.state === 'paused' ? 'Plan paused' : 'Free day'}><span>–</span></td>
-                    const it = d.items[i]
-                    if (!it) return <td key={i} className="c none" />
-                    const [sym, cls] = it.done ? ['✓', 'ok'] : it.st === 'skipped' ? ['⊘', 'skip'] : it.st === 'moved' ? ['↷', 'skip'] : it.st === 'missed' || past ? ['✗', 'bad'] : ['·', 'wait']
-                    const note = it.st === 'skipped' ? ' · skipped on purpose' : it.st === 'moved' ? ` · moved to ${niceDate(it.movedTo)}` : it.movedIn ? ` · moved from ${niceDate(it.from)}` : ''
-                    return <td key={i} className={`c ${cls}`} title={`${formatTime(it.s)} – ${formatTime(it.e)}${note}`}><span>{sym}</span><small>{formatTime(it.s)}–{formatTime(it.e)}</small></td>
-                  })}
-                  <td className={`c day ${!d.items.length ? 'rest' : ''}`}>{d.state === 'paused' ? 'Paused' : !d.items.length ? 'Free' : !d.due ? 'Off' : `${d.nd}/${d.due}`}</td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
-      <p className="legend muted"><span className="lg ok">✓</span>Done<span className="lg bad">✗</span>Missed<span className="lg skip">⊘</span>Skipped<span className="lg skip">↷</span>Moved<span className="lg">–</span>Free or paused<span className="lg wait">·</span>Not yet</p>
-    </section>
+    <div className="stack">
+      <section className="panel">
+        <h2>Study plan insights
+          {plans.length > 1 && <select className="plan-pick" value={g.id} onChange={(e) => setId(e.target.value)} aria-label="Choose plan">
+            {plans.map((x) => <option key={x.id} value={x.id}>{x.title}{x.archived ? ' (archived)' : ''}</option>)}</select>}
+        </h2>
+        <p className="plan-sum"><b>{g.title}</b> · {niceDate(info.start)} → {niceDate(info.end)}{info.todayIdx >= 0 ? ` · day ${info.todayIdx + 1} of ${info.n}` : ''}{daysLeft > 0 && todayStr >= info.start ? ` · ${daysLeft} ${daysLeft === 1 ? 'day' : 'days'} left` : ''}</p>
+
+        <div className="pi-cards">
+          <div><span>On track</span><b className={onTrack !== null && onTrack < 70 ? 'bad' : ''}>{onTrack ?? '–'}{onTrack !== null && <em>%</em>}</b><small>{info.doneAll} of {due} due</small></div>
+          <div><span>Hours done</span><b>{Math.round(st.minsDone / 6) / 10}<em>h</em></b><small>of {Math.round(st.minsPlanned / 6) / 10}h planned</small></div>
+          <div><span>Perfect days</span><b>{st.perfect}<em>/{st.activeDays}</em></b><small>best run {st.bestRun}</small></div>
+          <div><span>Projected finish</span><b>{projected ?? '–'}{projected !== null && <em>%</em>}</b><small>at your current pace</small></div>
+        </div>
+
+        <div className="pi-stack" role="img" aria-label={`${info.doneAll} done, ${info.missed} missed, ${info.left} to go`}>
+          <i className="d" style={{ width: seg(info.doneAll).width }} /><i className="m" style={{ width: seg(info.missed).width }} /><i className="l" style={{ width: seg(info.left).width }} />
+        </div>
+        <p className="legend muted pi-leg"><span className="dot d" />{info.doneAll} done<span className="dot m" />{info.missed} missed<span className="dot l" />{info.left} to go{info.skipped ? <><span className="dot s" />{info.skipped} skipped or moved</> : null}</p>
+
+        {tips.length > 0 && <ul className="pi-tips">{tips.map((t, i) => <li key={i}>{t}</li>)}</ul>}
+      </section>
+
+      {info.totalAll > 0 && <section className="panel">
+        <h2>When you finish shifts <small>completed ÷ due</small></h2>
+        <div className="pi-two">
+          <div><h3>By weekday</h3><RateBars rows={wkRows} /></div>
+          <div><h3>By time of day</h3><RateBars rows={todRows} /></div>
+        </div>
+        {st.topics.length > 0 && <>
+          <h3 className="pi-sub">Topics covered</h3>
+          <p className="chips">{st.topics.map(([t, n]) => <span className="chip" key={t}>{t} · {n}</span>)}</p>
+        </>}
+      </section>}
+
+      {st.weeks.length > 0 && <section className="panel">
+        <h2>Week by week</h2>
+        <ul className="plain pi-weeks">
+          {st.weeks.map((w, i) => {
+            const cur = todayStr >= w.key && todayStr <= fmt(addDays(parse(w.key), 6))
+            const p = pctOf(w.done, w.done + w.missed)
+            return (
+              <li key={w.key} className={cur ? 'cur' : ''}>
+                <div className="grow">
+                  <span className="gt">Week {i + 1} <span className="muted small">from {niceDate(w.key)}{cur ? ' · this week' : ''}</span></span>
+                  <div className="pi-stack sm"><i className="d" style={{ width: `${w.due ? (w.done / w.due) * 100 : 0}%` }} /><i className="m" style={{ width: `${w.due ? (w.missed / w.due) * 100 : 0}%` }} /><i className="l" style={{ width: `${w.due ? (w.left / w.due) * 100 : 0}%` }} /></div>
+                  <span className="muted small">{w.done}/{w.due} shifts · {Math.round(w.mins / 6) / 10}h{w.missed ? ` · ${w.missed} missed` : ''}</span>
+                </div>
+                <b className={`cnt ${p !== null && p < 60 ? 'bad' : ''}`}>{p === null ? '–' : `${p}%`}</b>
+              </li>
+            )
+          })}
+        </ul>
+      </section>}
+
+      <section className="panel">
+        <h2>Day by day
+          <span className="seg pi-filter" role="group" aria-label="Filter days">
+            {[['all', 'All'], ['attention', 'Needs attention'], ['upcoming', 'Upcoming']].map(([k, l]) =>
+              <button type="button" key={k} className={filter === k ? 'on' : ''} onClick={() => setFilter(k)}>{l}</button>)}
+          </span>
+        </h2>
+        <div className="ptable-wrap" ref={box}>
+          <table className="ptable">
+            <thead><tr><th>Date</th>{Array.from({ length: cols }, (_, i) => <th key={i}>Shift {i + 1}</th>)}</tr></thead>
+            <tbody>
+              {rowsShown.map((d) => {
+                const past = d.date < todayStr
+                return (
+                  <tr key={d.date} className={d.date === todayStr ? 'today' : ''}>
+                    <th scope="row">{niceDate(d.date)}</th>
+                    {Array.from({ length: cols }, (_, i) => {
+                      if (!d.items.length) return <td key={i} className="c rest" title={d.state === 'paused' ? 'Plan paused' : 'Free day'}><span>–</span></td>
+                      const it = d.items[i]
+                      if (!it) return <td key={i} className="c none" />
+                      const [sym, cls] = it.done ? ['✓', 'ok'] : it.st === 'skipped' ? ['⊘', 'skip'] : it.st === 'moved' ? ['↷', 'skip'] : it.st === 'missed' || past ? ['✗', 'bad'] : ['·', 'wait']
+                      const note = it.st === 'skipped' ? ' · skipped on purpose' : it.st === 'moved' ? ` · moved to ${niceDate(it.movedTo)}` : it.movedIn ? ` · moved from ${niceDate(it.from)}` : ''
+                      const learned = it.savedNote ? `\nLearned: ${it.savedNote}` : ''
+                      return <td key={i} className={`c ${cls}`} title={`${formatTime(it.s)} – ${formatTime(it.e)}${note}${learned}`}>
+                        <span>{sym}</span><small>{formatTime(it.s)}–{formatTime(it.e)}</small>
+                        {it.topic && <small className="tp">{it.topic}</small>}
+                        {it.savedNote && <small className="nt" aria-label="Has a note">📝</small>}
+                      </td>
+                    })}
+                  </tr>
+                )
+              })}
+              {!rowsShown.length && <tr><td className="c" colSpan={cols + 1}>Nothing to show for this filter.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+        <p className="legend muted"><span className="lg ok">✓</span>Done<span className="lg bad">✗</span>Missed<span className="lg skip">⊘</span>Skipped<span className="lg skip">↷</span>Moved<span className="lg">–</span>Free or paused<span className="lg wait">·</span>Not yet<span className="lg">📝</span>Has a note</p>
+      </section>
+    </div>
   )
 }
 
@@ -582,20 +717,43 @@ export function StudyWeek({ today, todayStr, ftimes, timer, elapsed }) {
 }
 
 /* ---------- full-screen, distraction-free timer ---------- */
-export function FocusOverlay({ open, timer, elapsed, todaySecs, error, shiftNow, onPause, onResume, onStop, onMinimize }) {
+export function FocusOverlay({ open, timer, elapsed, todaySecs, error, shiftNow, targetSecs = 0, ringValue = 0, onPause, onResume, onStop, onMinimize }) {
   if (!open || !timer) return null
   const running = !!timer.startedAt
+  const R = 140, C = 2 * Math.PI * R
+  const frac = targetSecs > 0 ? Math.min(1, ringValue / targetSecs) : (elapsed % 3600) / 3600
+  const started = timer.sessionStart ? new Date(timer.sessionStart).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) : ''
   return (
     <div className={`focus ${running ? 'run' : 'paused'}`} role="dialog" aria-modal="true" aria-label="Study timer">
-      <p className="focus-state">{running ? 'Studying' : 'Paused'}</p>
-      <time className="focus-clock">{clock(elapsed)}</time>
-      {shiftNow && <p className="focus-today">Shift now: <b>{formatTime(shiftNow.it.s)} – {formatTime(shiftNow.it.e)}</b> <span>{shiftNow.g.title}</span></p>}
-      <p className="focus-today">Today so far: <b>{hm(todaySecs)}</b> <span>(all sessions added together)</span></p>
-      <div className="focus-btns">
-        {running ? <button className="focus-main" onClick={onPause}>Pause</button> : <button className="focus-main" onClick={onResume}>Resume</button>}
-        <button className="focus-stop" onClick={onStop}>Stop &amp; save</button>
+      <header className="focus-top">
+        <button className="focus-round" aria-label="Hide this screen (timer keeps running)" onClick={onMinimize}><Icon name="down" /></button>
+        <span className="focus-badge"><i />{shiftNow ? 'Shift' : 'Free study'} · {running ? 'In progress' : 'Paused'}</span>
+        <span className="focus-round ghosted" aria-hidden="true" />
+      </header>
+      {shiftNow && shiftNow.g.tag && <span className="focus-chip"><Icon name="book" size={14} />{shiftNow.g.tag}</span>}
+      <h1 className="focus-title">{shiftNow ? shiftNow.g.title : 'Study session'}</h1>
+      <div className="focus-ring">
+        <svg viewBox="0 0 320 320" aria-hidden="true">
+          <circle cx="160" cy="160" r={R} className="trk" />
+          <circle cx="160" cy="160" r={R} className="val" style={{ strokeDasharray: C, strokeDashoffset: C * (1 - frac) }} />
+        </svg>
+        <div className="focus-center">
+          <span className="focus-state">{running ? 'Studying' : 'Paused'}</span>
+          <time className="focus-clock">{clock(elapsed)}</time>
+        </div>
       </div>
+      <div className="focus-meta">
+        {started && <span><Icon name="clock" size={16} />Started <b>{started}</b></span>}
+        {shiftNow && <span><Icon name="flag" size={16} />Shift ends <b>{formatTime(shiftNow.it.e)}</b></span>}
+      </div>
+      <p className="focus-today">Today so far: <b>{hm(todaySecs)}</b> <span>(all sessions added together)</span></p>
       {error && <p className="focus-err" role="alert">{error}</p>}
+      <div className="focus-btns">
+        {running
+          ? <button className="focus-main" onClick={onPause}><Icon name="pause" />Pause</button>
+          : <button className="focus-main" onClick={onResume}><Icon name="play" fill />Resume</button>}
+        <button className="focus-stop" onClick={onStop}><Icon name="check" />Stop &amp; save</button>
+      </div>
       <button className="focus-min" onClick={onMinimize}>Hide this screen (timer keeps running)</button>
     </div>
   )

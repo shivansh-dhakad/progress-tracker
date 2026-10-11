@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { PlanWizard, PlanEditor } from './plans.jsx'
+import Icon from './icons.jsx'
 
 const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 const addMonths = (d, n) => {
@@ -25,9 +26,9 @@ export function NewSheet({ view, setView, tags, onAdd, manage, editGoal, onEdit,
         </header>
         {view === 'choose' && (
           <div className="stack">
-            <button className="choice" onClick={() => setView('plan')}><b>📚 Study plan</b><span>Fixed time shifts for a number of days. Example: finish a book in 30 days, 2 shifts a day.</span></button>
-            <button className="choice" onClick={() => setView('habit')}><b>🔁 Habit</b><span>A simple task you repeat every day, week or month.</span></button>
-            <button className="choice" onClick={() => setView('deadline')}><b>🎯 One-time deadline</b><span>Something to finish by a date. Tick it once when done.</span></button>
+            <button className="choice" onClick={() => setView('plan')}><span className="choice-ic"><Icon name="book" /></span><b>Study plan</b><span>Fixed time shifts for a number of days. Example: finish a book in 30 days, 2 shifts a day.</span></button>
+            <button className="choice" onClick={() => setView('habit')}><span className="choice-ic"><Icon name="repeat" /></span><b>Habit</b><span>A simple task you repeat every day, week or month.</span></button>
+            <button className="choice" onClick={() => setView('deadline')}><span className="choice-ic"><Icon name="target" /></span><b>One-time deadline</b><span>Something to finish by a date. Tick it once when done.</span></button>
             <button className="link" onClick={() => setView('manage')}>Manage or archive existing goals</button>
             <button className="link" onClick={() => setView('settings')}>Reminders and study targets</button>
           </div>

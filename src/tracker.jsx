@@ -3,6 +3,7 @@ import { supabase } from './supabase'
 import { PlanToday, PlanProgress, StudyWeek, FocusOverlay, ShiftRow, planInfo, shiftsOn, freeToday, pausedToday, localDate, shiftMinutes, formatTime, shiftInfo, studiedOn } from './plans.jsx'
 import { SettingsPanel, useShiftReminders } from './reminders.jsx'
 import { NewSheet } from './newgoal.jsx'
+import Icon from './icons.jsx'
 
 const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 const parse = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d) }
@@ -358,30 +359,36 @@ export default function Tracker() {
   useShiftReminders(shiftsToday, settings.reminder_lead ?? 5, todayStr)
   const shiftNow = shiftsToday.find((x) => !x.it.done && nowHm >= x.it.s && nowHm <= x.it.e) || null
   const openEdit = (g) => { setEditGoal(g); setSheet('edit') }
+  const plannedSecs = shiftsToday.reduce((a, x) => a + shiftMinutes(x.it.s, x.it.e) * 60, 0)
+  const shiftPlanned = shiftNow ? shiftMinutes(shiftNow.it.s, shiftNow.it.e) * 60 : 0
+  const ringTarget = shiftPlanned || (settings.daily_target_minutes || 0) * 60
+  const ringValue = shiftPlanned ? elapsed : todaySecs
   const todays = [...shiftsToday, ...habitsToday]
   const todayDone = shiftsToday.filter((x) => x.it.done).length + habitsToday.filter(isDone).length
   const week = Array.from({ length: 7 }, (_, i) => fmt(addDays(weekStart(today), i)))
-  const ctx = { today, todayStr, nowHm, goals, fgoals, live, goalMap, done, fdone, ftimes, times, logs, isDone, scheduled, toggle, act, onEdit: openEdit, timer, elapsed, startTimer, pauseTimer, resumeTimer, stopTimer, slots, slotDone, fslotDone, todaySecs, shiftsToday, habitsToday }
+  const ctx = { today, todayStr, nowHm, goals, fgoals, live, goalMap, done, fdone, ftimes, times, logs, isDone, scheduled, toggle, act, onEdit: openEdit, timer, elapsed, startTimer, pauseTimer, resumeTimer, stopTimer, slots, slotDone, fslotDone, todaySecs, shiftsToday, habitsToday, openFocus: () => setFocus(true) }
   return (
     <div className="app">
       <aside className="side">
         <div className="brand">Streakbook</div>
-        <div className="badge"><b>{streak}</b><span>day streak</span></div>
+        <div className="badge"><Icon name="flame" fill /><b>{streak}</b><span>day streak</span></div>
         <PageNav tab={tab} setTab={setTab} className="nav" />
       </aside>
       <main className="main">
         <div className="toolbar">
-          <div>
-            <h1>{tab === 'dashboard' ? hello : tab === 'history' ? 'History' : 'Insights'}</h1>
-            <span className="muted">{longDate(todayStr)}</span>
+          <div className="title-block">
+            <span className="eyebrow">{longDate(todayStr)}</span>
+            <div className="title-row">
+              <h1>{tab === 'dashboard' ? 'Today’s Study Shifts' : tab === 'streaks' ? 'Streak & Momentum' : tab === 'history' ? 'History' : 'Insights'}</h1>
+              {tab === 'dashboard' && plannedSecs > 0 && <span className="plan-pill"><Icon name="clock" size={15} />{hm(plannedSecs)} planned</span>}
+            </div>
           </div>
-          <div>
+          <div className="tool-acts">
             {tags.length > 0 && (
               <select value={tag} onChange={(e) => setTag(e.target.value)} aria-label="Filter by subject">
                 <option value="">All subjects</option>{tags.map((t) => <option key={t}>{t}</option>)}
               </select>
             )}
-            <button className="primary new-btn" onClick={() => setSheet('choose')}>+ New</button>
             <button className="link" onClick={() => supabase.auth.signOut()}>Sign out</button>
           </div>
         </div>
@@ -404,7 +411,7 @@ export default function Tracker() {
         </section>}
         {timerError && <p className="msg" role="alert">{timerError}</p>}
         {notice && <p className="msg" role="alert">{notice} <button className="link" onClick={() => setNotice('')}>Dismiss</button></p>}
-        <FocusOverlay open={focus && !stopPrompt} timer={timer} elapsed={elapsed} todaySecs={todaySecs} error={timerError} shiftNow={shiftNow}
+        <FocusOverlay open={focus && !stopPrompt} timer={timer} elapsed={elapsed} todaySecs={todaySecs} error={timerError} shiftNow={shiftNow} targetSecs={ringTarget} ringValue={ringValue}
           onPause={pauseTimer} onResume={resumeTimer} onStop={stopTimer} onMinimize={() => setFocus(false)} />
         <StopPrompt prompt={stopPrompt} setPrompt={setStopPrompt} onSave={confirmStop} onCancel={cancelStop} />
         <ConfirmDelete goal={delTarget} onCancel={() => setDelTarget(null)} onConfirm={confirmRemove} />
@@ -415,6 +422,8 @@ export default function Tracker() {
           ? <Welcome onPlan={() => setSheet('plan')} onOther={() => setSheet('choose')} />
           : <>
             {dow(today) === 6 && <div className="banner">It’s Sunday. <button className="link" onClick={() => setTab('insights')}>Start your weekly review</button></div>}
+            {shiftNow && <ActiveShift cur={shiftNow} all={shiftsToday} nowHm={nowHm} timer={timer} onDone={() => act.toggle(shiftNow.g, shiftNow.it, todayStr)}
+              onStart={startTimer} onFocus={() => setFocus(true)} />}
             <Hero n={todayDone} total={todays.length} streak={streak} longest={longest} week={week} status={status} todayStr={todayStr} />
             {(!timer || settings.daily_target_minutes || settings.weekly_target_minutes) &&
               <StudyTarget todaySecs={todaySecs} weekSecs={weekSecs} settings={settings} timer={timer} startTimer={startTimer} onSetup={() => setSheet('settings')} />}
@@ -426,31 +435,55 @@ export default function Tracker() {
               <button className="link manage-link" onClick={() => setSheet('settings')}>Reminders &amp; study targets</button>
             </p>
           </>)}
+        {tab === 'streaks' && <Streak {...ctx} status={status} selected={selected} onSelect={setSelected} stats={{ streak, longest, total: active.size }} rest={rest} onRest={toggleRest} />}
         {tab === 'history' && <LogsTab {...ctx} tag={tag} onSave={saveNote} />}
-        {tab === 'insights' && <Insights {...ctx} reviews={reviews} onSaveReview={saveReview}
-          streakNode={<Streak {...ctx} status={status} selected={selected} onSelect={setSelected} stats={{ streak, longest, total: active.size }} rest={rest} onRest={toggleRest} />} />}
+        {tab === 'insights' && <Insights {...ctx} reviews={reviews} onSaveReview={saveReview} />}
       </main>
+      <button className="fab" onClick={() => setSheet('choose')} aria-label="Add a plan, habit or deadline"><Icon name="plus" />New</button>
       <PageNav tab={tab} setTab={setTab} className="mobile-nav" />
     </div>
   )
 }
 
-const ICONS = {
-  dashboard: <path d="M4 11.5 12 5l8 6.5V19a1 1 0 0 1-1 1h-4v-5H9v5H5a1 1 0 0 1-1-1z" />,
-  history: <><circle cx="12" cy="12" r="8" /><path d="M12 7.5V12l3 2" /></>,
-  insights: <path d="M5 19v-8M12 19V5M19 19v-5" />,
-}
 function PageNav({ tab, setTab, className }) {
-  const pages = [['dashboard', 'Dashboard'], ['history', 'History'], ['insights', 'Insights']]
+  const pages = [['dashboard', 'Planner', 'calendar'], ['streaks', 'Streaks', 'flame'], ['history', 'History', 'clock'], ['insights', 'Insights', 'bars']]
   return (
     <nav className={className} aria-label="Main navigation">
-      {pages.map(([key, label]) => (
+      {pages.map(([key, label, icon]) => (
         <button key={key} type="button" className={tab === key ? 'on' : ''}
           aria-current={tab === key ? 'page' : undefined} onClick={() => setTab(key)}>
-          <svg viewBox="0 0 24 24" aria-hidden="true">{ICONS[key]}</svg><span>{label}</span>
+          <span className="navic"><Icon name={icon} /></span><span>{label}</span>
         </button>
       ))}
     </nav>
+  )
+}
+
+/* ---------- the shift that is running right now ---------- */
+const toMin = (t) => { const [h, m] = t.split(':').map(Number); return h * 60 + m }
+const mins = (m) => (m >= 60 ? `${Math.floor(m / 60)}h${m % 60 ? ` ${m % 60}m` : ''}` : `${m}m`)
+function ActiveShift({ cur, all, nowHm, timer, onDone, onStart, onFocus }) {
+  const { g, it } = cur
+  const total = Math.max(1, toMin(it.e) - toMin(it.s)), spent = Math.min(total, Math.max(0, toMin(nowHm) - toMin(it.s)))
+  const order = [...all].sort((a, b) => a.it.s.localeCompare(b.it.s))
+  const pos = order.findIndex((x) => x.g.id === g.id && x.it.idx === it.idx && (x.it.from || '') === (it.from || '')) + 1
+  return (
+    <section className="active-shift" aria-label="Shift in progress">
+      <div className="as-top">
+        <span className="as-live"><i />Active shift in progress</span>
+        <span className="as-count">Shift {pos} of {order.length}</span>
+      </div>
+      <h2 className="as-title">{g.title}</h2>
+      <p className="as-time"><Icon name="clock" size={17} />{formatTime(it.s)} – {formatTime(it.e)} <span>({mins(total)} total)</span></p>
+      <div className="as-prog"><span>{mins(spent)} elapsed</span><span>{mins(total - spent)} left</span></div>
+      <div className="as-track"><i style={{ width: `${(spent / total) * 100}%` }} /></div>
+      {(it.topic || g.tag) && <p className="as-topic"><Icon name="bolt" size={15} />{it.topic ? <>Topic: <b>{it.topic}</b></> : <>Subject: <b>{g.tag}</b></>}</p>}
+      <div className="as-btns">
+        <button className="primary" onClick={onDone}><Icon name="check" />Complete shift</button>
+        {timer ? <button className="ghost" onClick={onFocus}><Icon name="expand" />Focus screen</button>
+          : <button className="ghost" onClick={onStart}><Icon name="timer" />Start timer</button>}
+      </div>
+    </section>
   )
 }
 
@@ -493,11 +526,30 @@ function Streak({ today, todayStr, status, selected, onSelect, stats, done, goal
   const note = (logs[selected] || '').trim()
   const sessions = times.filter((t) => t.log_date === selected && !t.goal_id && t.seconds > 0)
   const pick = (d) => { onSelect(d); setRestDate(d) }
+  const MILES = [3, 7, 14, 21, 30, 50, 75, 100, 150, 200, 365]
+  const nextM = MILES.find((x) => x > stats.streak) || stats.streak + 100
+  const prevM = [...MILES].reverse().find((x) => x <= stats.streak) || 0
+  const focusSecs = (times || []).reduce((a, t) => a + t.seconds, 0)
+  const msg = stats.streak === 0
+    ? 'Finish a shift, a habit, a note or a timer session today to start your streak.'
+    : status(todayStr) === 'pending' ? 'Finish something today to keep the flame alive.' : 'Today is secured. Come back tomorrow to keep it going.'
   return (
+    <div className="stack">
+      <section className="streak-hero">
+        <div>
+          <span className="sh-chip"><Icon name="bolt" size={14} />{stats.streak >= 7 ? 'Unstoppable flame' : stats.streak > 0 ? 'Flame is lit' : 'Light the flame'}</span>
+          <h2><b>{stats.streak}-Day</b> <em>Streak</em></h2>
+          <p>{msg}</p>
+        </div>
+        <div className="sh-flame"><Icon name="flame" fill /></div>
+      </section>
+      <section className="stat-cards" aria-label="Streak statistics">
+        <div><span>Current</span><b className="fire">{stats.streak}d</b></div>
+        <div><span>Best</span><b>{stats.longest}d</b></div>
+        <div><span>Active days</span><b>{stats.total}</b></div>
+        <div><span>Focus</span><b>{hm(focusSecs)}</b></div>
+      </section>
     <section className="panel streak">
-      <div className="stats">
-        <div><b>{stats.streak}</b><span>current</span></div><div><b>{stats.longest}</b><span>longest</span></div><div><b>{stats.total}</b><span>active days</span></div>
-      </div>
       <div className="calhead">
         <button className="ghost" aria-label="Previous month" onClick={() => setMo(mo - 1)}>←</button>
         <div><h2>{m.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</h2><span className="muted small">{hits} active {hits === 1 ? 'day' : 'days'}</span></div>
@@ -510,7 +562,7 @@ function Streak({ today, todayStr, status, selected, onSelect, stats, done, goal
               title={`${longDate(d)}: ${words[status(d)]}`} aria-label={`${longDate(d)}: ${words[status(d)]}`} onClick={() => pick(d)}>{+d.slice(8)}</button>
           : <span key={'b' + i} />)}
       </div>
-      <p className="legend muted"><i className="cell hit" />Done<i className="cell miss" />Missed<i className="cell rest" />Rest<i className="cell pending" />Open</p>
+      <p className="legend muted"><i className="cell hit" />Active<i className="cell miss" />Missed<i className="cell rest" />Rest<i className="cell pending" />Open</p>
       <details className="more streak-help">
         <summary>How streaks work</summary>
         <ul>
@@ -536,6 +588,14 @@ function Streak({ today, todayStr, status, selected, onSelect, stats, done, goal
         </div>
       </div>
     </section>
+      <section className="panel milestone">
+        <span className="ms-eyebrow"><Icon name="flag" size={15} />Next milestone</span>
+        <h3>{nextM}-day streak</h3>
+        <p className="muted small">{nextM - stats.streak} {nextM - stats.streak === 1 ? 'day' : 'days'} to go. Your best run so far is {stats.longest} {stats.longest === 1 ? 'day' : 'days'}.</p>
+        <div className="ms-track"><i style={{ width: `${Math.min(100, ((stats.streak - prevM) / (nextM - prevM)) * 100)}%` }} /></div>
+        <div className="ms-ends"><span>{prevM}d</span><span>{nextM}d</span></div>
+      </section>
+    </div>
   )
 }
 
@@ -584,7 +644,7 @@ function TodayList(c) {
   const free = freeToday(live, slots, todayStr), paused = pausedToday(live, slots, todayStr)
   return (
     <section className="panel">
-      <h2>Today <small>{n} of {items.length} done</small></h2>
+      <h2>Timeline blocks <small>{n} of {items.length} done</small></h2>
       <div className="bar"><div style={{ width: items.length ? `${(n / items.length) * 100}%` : 0 }} /></div>
       <ul className="plain">
         {items.map((i) => i.shift
@@ -760,7 +820,7 @@ const Bars = ({ data, unit = '' }) => {
   const m = Math.max(1, ...data.map((d) => d.v))
   return <div className="bars">{data.map((d, i) => <div key={i}><b>{d.v}{unit}</b><div className="col"><i style={{ height: `${(d.v / m) * 100}%` }} /></div><small>{d.l}</small></div>)}</div>
 }
-function Insights({ today, todayStr, goals, fgoals, live, fdone, ftimes, logs, reviews, isDone, timer, elapsed, onSaveReview, slots, slotDone, fslotDone, streakNode }) {
+function Insights({ today, todayStr, goals, fgoals, live, fdone, ftimes, logs, reviews, isDone, timer, elapsed, onSaveReview, slots, slotDone, fslotDone, times, goalMap }) {
   const [view, setView] = useState('overview')
   const [off, setOff] = useState(0), [note, setNote] = useState(''), [saved, setSaved] = useState(false)
   const ws = fmt(addDays(weekStart(today), 7 * off)), we = fmt(addDays(parse(ws), 6))
@@ -829,8 +889,30 @@ function Insights({ today, todayStr, goals, fgoals, live, fdone, ftimes, logs, r
     const unit = g.period === 'daily' ? 'days' : g.period === 'weekly' ? 'weeks' : 'months'
     return { g, kind: g.period === 'daily' ? 'Daily habit' : g.period === 'weekly' ? 'Weekly habit' : 'Monthly habit', pct: total > 0 ? Math.min(100, Math.round((hit / total) * 100)) : null, detail: total > 0 ? `${hit} of ${total} ${unit}` : 'Just started' }
   }).sort((a, b) => (a.g.period === 'plan' ? 0 : 1) - (b.g.period === 'plan' ? 0 : 1) || a.kind.localeCompare(b.kind))
+  const hl = (() => {
+    const cutH = fmt(addDays(today, -29)), perDay = {}, perDow = Array(7).fill(0), hours = [0, 0, 0, 0], cnt = {}
+    let longest = 0, sessions = 0
+    ftimes.filter((t) => t.log_date >= cutH && t.log_date <= todayStr && t.seconds > 0).forEach((t) => {
+      perDay[t.log_date] = (perDay[t.log_date] || 0) + t.seconds
+      perDow[dow(parse(t.log_date))] += t.seconds
+      longest = Math.max(longest, t.seconds); sessions++
+      if (t.started_at) { const h = new Date(t.started_at).getHours(); hours[h < 12 ? 0 : h < 17 ? 1 : h < 21 ? 2 : 3] += t.seconds }
+    })
+    if (timer && timer.logDate >= cutH) { perDay[timer.logDate] = (perDay[timer.logDate] || 0) + elapsed; perDow[dow(parse(timer.logDate))] += elapsed; longest = Math.max(longest, elapsed) }
+    const ds = Object.entries(perDay), total = ds.reduce((a, [, s]) => a + s, 0)
+    const names = ['Morning', 'Afternoon', 'Evening', 'Night'], mx = Math.max(...hours)
+    ;[...fdone, ...fslotDone].filter((c) => c.done_on >= cutH && c.done_on <= todayStr).forEach((c) => {
+      const g = goalMap?.[c.goal_id]; if (!g) return
+      const k = g.tag || g.title; cnt[k] = (cnt[k] || 0) + 1
+    })
+    return {
+      avg: ds.length ? Math.round(total / ds.length) : 0, bestDay: ds.sort((a, b) => b[1] - a[1])[0], longest,
+      peak: mx > 0 ? names[hours.indexOf(mx)] : '', activeDays: ds.length, avgSessions: ds.length ? Math.round((sessions / ds.length) * 10) / 10 : 0,
+      byDow: perDow.map((s, i) => ({ l: DAYS[i], v: Math.round((s / 3600) * 10) / 10 })),
+      top: Object.entries(cnt).sort((a, b) => b[1] - a[1]).slice(0, 4),
+    }
+  })()
   const dlt = currentWeekDone.length - previousWeekDone.length
-  const save = async () => { await onSaveReview(ws, note); setSaved(true); setTimeout(() => setSaved(false), 1500) }
   return (
     <div className="stack">
       <div className="seg insight-tabs" role="tablist" aria-label="Insights sections">
@@ -844,16 +926,21 @@ function Insights({ today, todayStr, goals, fgoals, live, fdone, ftimes, logs, r
           <div><b>{act30}<em>/30</em></b><span>active days</span><small>last 30 days</small></div>
           <div><b>{hm(currentWeekSeconds)}</b><span>study time</span><small>this week</small></div>
         </section>
-        {streakNode}
         <section className="panel">
-          <h2>Weekly review <span className="wk"><button className="ghost" aria-label="Previous week" onClick={() => setOff(off - 1)}>←</button>{ws.slice(5)} – {we.slice(5)}<button className="ghost" aria-label="Next week" disabled={off >= 0} onClick={() => setOff(off + 1)}>→</button></span></h2>
-          <div className="stats">
-            <div><b>{wd.length}</b><span>completed</span></div><div><b>{days}/7</b><span>days active</span></div>
-            <div><b>{best ? DAYS[dow(parse(best[0]))] : '–'}</b><span>best day{best ? ` (${best[1]})` : ''}</span></div><div><b>{hm(secs)}</b><span>studied</span></div>
+          <h2>Study highlights <small>last 30 days</small></h2>
+          <div className="stat-cards hl-cards">
+            <div><span>Avg / study day</span><b>{hm(hl.avg)}</b></div>
+            <div><span>Best day</span><b>{hl.bestDay ? hm(hl.bestDay[1]) : '–'}</b>{hl.bestDay && <small>{shortDate(hl.bestDay[0])}</small>}</div>
+            <div><span>Longest session</span><b>{hl.longest ? hm(hl.longest) : '–'}</b></div>
+            <div><span>Peak time</span><b>{hl.peak || '–'}</b></div>
           </div>
-          <label className="lbl">What will you change next week?</label>
-          <textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)} placeholder="One thing to keep, one thing to change" />
-          <button className="primary" onClick={save}>{saved ? 'Saved ✓' : 'Save review'}</button>
+          <h3 className="pi-sub">Study hours by weekday</h3>
+          <Bars data={hl.byDow} unit="h" />
+          {hl.top.length > 0 && <>
+            <h3 className="pi-sub">Most worked on</h3>
+            <ul className="plain">{hl.top.map(([name, n]) => <li key={name}><span className="gt">{name}</span><b className="cnt">{n} done</b></li>)}</ul>
+          </>}
+          <p className="muted small">{hl.activeDays} of the last 30 days had study time. {hl.avgSessions ? `You average ${hl.avgSessions} sessions on those days.` : ''}</p>
         </section>
         {stalled.length > 0 && <section className="panel attention">
           <h2>Needs attention <small>nothing done in 14 days</small></h2>
